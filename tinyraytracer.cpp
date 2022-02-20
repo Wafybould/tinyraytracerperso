@@ -52,6 +52,17 @@ struct Sphere {
         if (t0 < 0) return false;
         return true;
     }
+
+    bool ray_intersectDeath(const Vec3f &orig, const Vec3f &dir, float &t1) const {
+        Vec3f L = center - orig;
+        float tca = L*dir;
+        float d2 = L*L - tca*tca;
+        if (d2 > radius*radius) return false;
+        float thc = sqrtf(radius*radius - d2);
+        t1 = tca + thc;
+        if (t1 < 0) return false;
+        return true;
+    }
 };
 
 Vec3f reflect(const Vec3f &I, const Vec3f &N) {
@@ -66,7 +77,7 @@ Vec3f refract(const Vec3f &I, const Vec3f &N, const float eta_t, const float eta
     return k<0 ? Vec3f(1,0,0) : I*eta + N*(eta*cosi - sqrtf(k)); // k<0 = total reflection, no ray to refract. I refract it anyways, this has no physical meaning
 }
 
-bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material) {
+bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const Sphere &deathStar,  const Sphere &deathStar2, Vec3f &hit, Vec3f &N, Material &material) {
     float spheres_dist = std::numeric_limits<float>::max();
     for (size_t i=0; i < spheres.size(); i++) {
         float dist_i;
@@ -76,6 +87,27 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
             N = (hit - spheres[i].center).normalize();
             material = spheres[i].material;
         }
+    }
+
+    float dist_i;
+    if (deathStar2.ray_intersectDeath(orig, dir, dist_i) && dist_i < spheres_dist) {
+        hit =  orig + dir * dist_i;
+        double rayon = pow(deathStar.center.x - hit.x, 2) + pow(deathStar.center.y - hit.y, 2) + pow(deathStar.center.z - hit.z, 2);
+        if(rayon < pow(deathStar.radius,2)) {
+            spheres_dist = dist_i;
+            N = (- (hit - deathStar2.center)).normalize();
+            material = deathStar2.material;
+        }
+    }
+
+    if (deathStar.ray_intersect(orig, dir, dist_i) && dist_i < spheres_dist) {
+        hit =  orig + dir * dist_i;
+        double rayon = pow(deathStar2.center.x - hit.x, 2) + pow(deathStar2.center.y - hit.y, 2) + pow(deathStar2.center.z - hit.z, 2);
+        if(rayon > pow(deathStar2.radius,2)) {
+           spheres_dist = dist_i;
+           N = (hit - deathStar.center).normalize();
+           material = deathStar.material;
+       }
     }
 
     float duck_dist = std::numeric_limits<float>::max();
@@ -107,11 +139,11 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
     return std::min(std::min(spheres_dist, checkerboard_dist),duck_dist)<1000;
 }
 
-Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights, size_t depth=0) {
+Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const Sphere &deathStar, const Sphere &deathStar2 , const std::vector<Light> &lights, size_t depth=0) {
     Vec3f point, N;
     Material material;
 
-    if (depth>4 || !scene_intersect(orig, dir, spheres, point, N, material)) {
+    if (depth>4 || !scene_intersect(orig, dir, spheres, deathStar, deathStar2,point, N, material)) {
 
         int a = std::max(0, std::min(envmap_width - 1, static_cast<int>((atan2(dir.z, dir.x) / (2 * M_PI) + .5) * envmap_width)));
         int b = std::max(0, std::min(envmap_height - 1, static_cast<int>(acos(dir.y) / M_PI * envmap_height)));
@@ -129,8 +161,8 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
     Vec3f refract_dir = refract(dir, N, material.refractive_index).normalize();
     Vec3f reflect_orig = reflect_dir*N < 0 ? point - N*1e-3 : point + N*1e-3; // offset the original point to avoid occlusion by the object itself
     Vec3f refract_orig = refract_dir*N < 0 ? point - N*1e-3 : point + N*1e-3;
-    Vec3f reflect_color = cast_ray(reflect_orig, reflect_dir, spheres, lights, depth + 1);
-    Vec3f refract_color = cast_ray(refract_orig, refract_dir, spheres, lights, depth + 1);
+    Vec3f reflect_color = cast_ray(reflect_orig, reflect_dir, spheres, deathStar, deathStar2,lights, depth + 1);
+    Vec3f refract_color = cast_ray(refract_orig, refract_dir, spheres, deathStar, deathStar2,lights, depth + 1);
 
     float diffuse_light_intensity = 0, specular_light_intensity = 0;
     for (size_t i=0; i<lights.size(); i++) {
@@ -140,7 +172,7 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
         Vec3f shadow_orig = light_dir*N < 0 ? point - N*1e-3 : point + N*1e-3; // checking if the point lies in the shadow of the lights[i]
         Vec3f shadow_pt, shadow_N;
         Material tmpmaterial;
-        if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial) && (shadow_pt-shadow_orig).norm() < light_distance)
+        if (scene_intersect(shadow_orig, light_dir, spheres, deathStar, deathStar2 ,shadow_pt, shadow_N, tmpmaterial) && (shadow_pt-shadow_orig).norm() < light_distance)
             continue;
 
         diffuse_light_intensity  += lights[i].intensity * std::max(0.f, light_dir*N);
@@ -149,7 +181,7 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
     return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.)*specular_light_intensity * material.albedo[1] + reflect_color*material.albedo[2] + refract_color*material.albedo[3];
 }
 
-void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights) {
+void render(const std::vector<Sphere> &spheres, const Sphere deathStar, const Sphere deathStar2 , const std::vector<Light> &lights) {
     /*const int   width    = 1024;
     const int   height   = 768;
     const float fov      = M_PI/3.;
@@ -172,9 +204,9 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
             float dir_x = (i + 0.5) - width / 2.;
             float dir_y = -(j + 0.5) + height / 2.; // this flips the image at the same time
             float dir_z = -height / (2. * tan(fov / 2.));
-            // framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, lights);
-            framebuffer1[i + j * width] = cast_ray(Vec3f(-eyesep / 2, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, lights);
-            framebuffer2[i + j * width] = cast_ray(Vec3f(+eyesep / 2, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, lights);
+            //framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, lights);
+            framebuffer1[i + j * width] = cast_ray(Vec3f(-eyesep / 2, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, deathStar, deathStar2, lights);
+            framebuffer2[i + j * width] = cast_ray(Vec3f(+eyesep / 2, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, deathStar, deathStar2 ,lights);
         }
     }
     /*for (size_t j = 0; j<height; j++) { // actual rendering loop
@@ -219,6 +251,30 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
     }
     //stbi_write_jpg("out.jpg", width, height, 3, pixmap.data(), 100);
     stbi_write_jpg("out.jpg", width - delta, height, 3, pixmap.data(), 100);
+
+    /*std::vector<Vec3f> framebuffer(width*height);
+
+#pragma omp parallel for
+    for (size_t j = 0; j<height; j++) { // actual rendering loop
+        for (size_t i = 0; i<width; i++) {
+            float dir_x =  (i + 0.5) -  width/2.;
+            float dir_y = -(j + 0.5) + height/2.;    // this flips the image at the same time
+            float dir_z = -height/(2.*tan(fov/2.));
+            framebuffer[i+j*width] = cast_ray(Vec3f(0,0,0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, deathStar, deathStar2, lights);
+        }
+    }
+
+    std::vector<unsigned char> pixmap(width*height*3);
+    for (size_t i = 0; i < height*width; ++i) {
+        Vec3f &c = framebuffer[i];
+        float max = std::max(c[0], std::max(c[1], c[2]));
+        if (max>1) c = c*(1./max);
+        for (size_t j = 0; j<3; j++) {
+            pixmap[i*3+j] = (unsigned char)(255 * std::max(0.f, std::min(1.f, framebuffer[i][j])));
+        }
+    }
+    stbi_write_jpg("out.jpg", width, height, 3, pixmap.data(), 100);*/
+
 }
 
 int main() {
@@ -240,6 +296,7 @@ int main() {
     Material      glass(1.5, Vec4f(0.0,  0.5, 0.1, 0.8), Vec3f(0.6, 0.7, 0.8),  125.);
     Material red_rubber(1.0, Vec4f(0.9,  0.1, 0.0, 0.0), Vec3f(0.3, 0.1, 0.1),   10.);
     Material     mirror(1.0, Vec4f(0.0, 10.0, 0.8, 0.0), Vec3f(1.0, 1.0, 1.0), 1425.);
+    Material      empty(0.0, Vec4f(0.0, 0.0, 0.0, 0.0),  Vec3f(0.0, 0.0, 0.0), 100.);
 
     std::vector<Sphere> spheres;
     spheres.push_back(Sphere(Vec3f(-3,    0,   -16), 2,      ivory));
@@ -247,12 +304,16 @@ int main() {
     spheres.push_back(Sphere(Vec3f( 1.5, -0.5, -18), 3, red_rubber));
     spheres.push_back(Sphere(Vec3f( 7,    5,   -18), 4,     mirror));
 
+
+    Sphere deathStar = Sphere(Vec3f(-4,    3,   -10), 2, red_rubber);
+    Sphere deathStar2 = Sphere(Vec3f(-3.25,  3.5, -8.5), 1,      red_rubber);
+
     std::vector<Light>  lights;
     lights.push_back(Light(Vec3f(-20, 20,  20), 1.5));
     lights.push_back(Light(Vec3f( 30, 50, -25), 1.8));
     lights.push_back(Light(Vec3f( 30, 20,  30), 1.7));
 
-    render(spheres, lights);
+    render(spheres, deathStar, deathStar2, lights);
 
     return 0;
 }
